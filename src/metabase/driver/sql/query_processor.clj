@@ -1,38 +1,43 @@
 (ns metabase.driver.sql.query-processor
   "The Query Processor is responsible for translating the Metabase Query Language into HoneySQL SQL forms."
-  (:require [clojure.core.match :refer [match]]
-            [clojure.string :as str]
-            [clojure.tools.logging :as log]
-            [honeysql.core :as hsql]
-            [honeysql.format :as hformat]
-            [honeysql.helpers :as h]
-            [metabase.driver :as driver]
-            [metabase.driver.common :as driver.common]
-            [metabase.mbql.schema :as mbql.s]
-            [metabase.mbql.util :as mbql.u]
-            [metabase.models.field :as field :refer [Field]]
-            [metabase.models.table :refer [Table]]
-            [metabase.query-processor.error-type :as qp.error-type]
-            [metabase.query-processor.interface :as i]
-            [metabase.query-processor.middleware.annotate :as annotate]
-            [metabase.query-processor.middleware.wrap-value-literals :as value-literal]
-            [metabase.query-processor.store :as qp.store]
-            [metabase.util :as u]
-            [metabase.util.honeysql-extensions :as hx]
-            [metabase.util.i18n :refer [deferred-tru tru]]
-            [metabase.util.schema :as su]
-            [potemkin.types :as p.types]
-            [pretty.core :refer [PrettyPrintable]]
-            [schema.core :as s])
-  (:import metabase.models.field.FieldInstance
-           [metabase.util.honeysql_extensions Identifier TypedHoneySQLForm]))
+  (:require
+   [clojure.core.match :refer [match]]
+   [clojure.string :as str]
+   [clojure.tools.logging :as log]
+   [honeysql.core :as hsql]
+   [honeysql.format :as hformat]
+   [honeysql.helpers :as h]
+   [metabase.driver :as driver]
+   [metabase.driver.common :as driver.common]
+   [metabase.mbql.schema :as mbql.s]
+   [metabase.mbql.util :as mbql.u]
+   [metabase.models.field :as field :refer [Field]]
+   [metabase.models.table :refer [Table]]
+   [metabase.query-processor.error-type :as qp.error-type]
+   [metabase.query-processor.interface :as i]
+   [metabase.query-processor.middleware.add-references.add-exports
+    :as add-exports]
+   [metabase.query-processor.middleware.annotate :as annotate]
+   [metabase.query-processor.middleware.wrap-value-literals
+    :as value-literal]
+   [metabase.query-processor.store :as qp.store]
+   [metabase.util :as u]
+   [metabase.util.honeysql-extensions :as hx]
+   [metabase.util.i18n :refer [deferred-tru tru]]
+   [metabase.util.schema :as su]
+   [potemkin.types :as p.types]
+   [pretty.core :refer [PrettyPrintable]]
+   [schema.core :as s])
+  (:import
+   (metabase.models.field FieldInstance)
+   (metabase.util.honeysql_extensions Identifier TypedHoneySQLForm)))
 
 ;; TODO - yet another `*query*` dynamic var. We should really consolidate them all so we only need a single one.
 (def ^:dynamic ^:private *query*
   "The INNER query currently being processed, for situations where we need to refer back to it."
   nil)
 
-(def ^:dynamic ^:private *source-aliases*
+(def ^:dynamic ^:private ^:deprecated *source-aliases*
   "A map of field-clause -> alias for Fields that come from nested source queries or joins, e.g.
 
     {[:field-id 1 {:join-alias \"X\"}] \"Q1__my_field\"}
@@ -63,7 +68,7 @@
   Each nested query increments this counter by 1."
   0)
 
-(def ^:dynamic *field-options*
+(def ^:dynamic ^:deprecated *field-options*
   "Bound to the `options` part of a `:field` clause when that clause is being compiled to HoneySQL. Useful if you store
   additional keys there and need to access them."
   nil)
@@ -282,7 +287,7 @@
 ;;; |                                           Low-Level ->honeysql impls                                           |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
-(def ^:dynamic *table-alias*
+(def ^:dynamic ^:deprecated *table-alias*
   "The alias, if any, that should be used to qualify Fields when building the HoneySQL form, instead of defaulting to
   schema + Table name. Used to implement things like joined `:field`s."
   nil)
@@ -341,11 +346,12 @@
   identifier)
 
 ;; TODO -- we should remove this and record this information directly in the relevant `:field` clauses.
-(def ^:dynamic ^:private *joined-field?*
+(def ^:dynamic ^:private ^:deprecated *joined-field?*
   "Are we inside a joined field whose join is at the current level of the query?"
   false)
 
-(defmulti prefix-field-alias
+;; TODO -- maybe this should be deprecated, maybe not.
+(defmulti ^:deprecated prefix-field-alias
   "Create a Field alias by combining a `prefix` string with `field-alias` string (itself is the result of the
   `field->alias` method). The default implementation just joins the two strings with `__` -- override this if you need
   to do something different."
@@ -357,7 +363,7 @@
   [_ prefix field-alias]
   (str prefix "__" field-alias))
 
-(s/defn ^:private unambiguous-field-alias :- su/NonBlankString
+(s/defn ^:private ^:deprecated unambiguous-field-alias :- su/NonBlankString
   [driver [_ field-id {:keys [join-alias]}] :- mbql.s/field:id]
   (let [field-alias (field->alias driver (qp.store/field field-id))]
     (if (and join-alias field-alias
@@ -433,33 +439,35 @@
 
 (defmethod ->honeysql [:sql :field]
   [driver [_ field-id-or-name options :as field-clause]]
-  (binding [*field-options* options]
-    (cond
-      (get *source-aliases* field-clause)
-      (let [field-alias (get *source-aliases* field-clause)
-            options     (assoc options ::source-alias field-alias)]
-        ;; recurse with the ::source-alias added to Field options. Since it won't be equal anymore it will prevent
-        ;; infinite recursion.
-        (->honeysql driver [:field field-id-or-name options]))
+  (println "FIELD =>" (pr-str field-clause)) ; NOCOMMIT
+  (u/prog1 (binding [*field-options* options]
+             (cond
+               (get *source-aliases* field-clause)
+               (let [field-alias (get *source-aliases* field-clause)
+                     options     (assoc options ::source-alias field-alias)]
+                 ;; recurse with the ::source-alias added to Field options. Since it won't be equal anymore it will prevent
+                 ;; infinite recursion.
+                 (->honeysql driver [:field field-id-or-name options]))
 
-      (:join-alias options)
-      (compile-field-with-join-aliases driver field-clause)
+               (:join-alias options)
+               (compile-field-with-join-aliases driver field-clause)
 
-      :else
-      (let [honeysql-form (cond
-                            ;; selects from an inner select should not
-                            (and (integer? field-id-or-name) (contains? options ::outer-select))
-                            (->honeysql driver (assoc (qp.store/field field-id-or-name) ::outer-select true))
+               :else
+               (let [honeysql-form (cond
+                                     ;; selects from an inner select should not
+                                     (and (integer? field-id-or-name) (contains? options ::outer-select))
+                                     (->honeysql driver (assoc (qp.store/field field-id-or-name) ::outer-select true))
 
-                            (integer? field-id-or-name)
-                            (->honeysql driver (qp.store/field field-id-or-name))
+                                     (integer? field-id-or-name)
+                                     (->honeysql driver (qp.store/field field-id-or-name))
 
-                            :else
-                            (cond-> (->honeysql driver (hx/identifier :field *table-alias* field-id-or-name))
-                              (:database-type options) (hx/with-database-type-info (:database-type options))))]
-        (cond->> honeysql-form
-          (:temporal-unit options) (apply-temporal-bucketing driver options)
-          (:binning options)       (apply-binning options))))))
+                                     :else
+                                     (cond-> (->honeysql driver (hx/identifier :field *table-alias* field-id-or-name))
+                                       (:database-type options) (hx/with-database-type-info (:database-type options))))]
+                 (cond->> honeysql-form
+                   (:temporal-unit options) (apply-temporal-bucketing driver options)
+                   (:binning options)       (apply-binning options)))))
+    (println "      =>" (pr-str <>))))
 
 
 (defmethod ->honeysql [:sql :count]
@@ -1033,7 +1041,7 @@
                                                              :join-alias (:alias join))]]
                                    [field alias]))}))
 
-(s/defn ^:private source-aliases :- SourceAliasInfo
+(s/defn ^:private ^:deprecated source-aliases :- SourceAliasInfo
   "Build the `*source-aliases*` map. `:this-level-fields` are the ones actually bound to `*source-aliases*`;
   `:source-fields` is only used when recursively building the map."
   [driver inner-query :- mbql.s/SourceQuery]
@@ -1098,6 +1106,7 @@
 (defn mbql->honeysql
   "Build the HoneySQL form we will compile to SQL and execute."
   [driver {inner-query :query}]
+  (println "(u/pprint-to-str 'yellow inner-query):" (u/pprint-to-str 'yellow inner-query)) ; NOCOMMIT
   (u/prog1 (apply-clauses driver {} (preprocess-query driver inner-query))
     (when-not i/*disable-qp-logging*
       (log/tracef "\nHoneySQL Form: %s\n%s" (u/emoji "🍯") (u/pprint-to-str 'cyan <>)))))
@@ -1108,7 +1117,7 @@
 
 (defn mbql->native
   "Transpile MBQL query into a native SQL statement."
-  [driver {inner-query :query, database :database, :as outer-query}]
-  (let [honeysql-form (mbql->honeysql driver outer-query)
+  [driver {database :database, :as outer-query}]
+  (let [honeysql-form (mbql->honeysql driver (add-exports/add-exports outer-query))
         [sql & args]  (format-honeysql driver honeysql-form)]
     {:query sql, :params args}))

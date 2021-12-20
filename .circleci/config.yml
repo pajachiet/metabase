@@ -1056,7 +1056,7 @@ workflows:
             - checkout
 
       - clojure:
-          name: be-tests-java-8<< matrix.edition >>
+          name: be-tests-java-8-<< matrix.edition >>
           requires:
             - be-deps
           e: java-8

@@ -588,7 +588,7 @@
   (let [query (str/lower-case query)]
     (for [[orig remapped] v->human-readable
           :when           (and (string? remapped)
-                               (str/includes? (str/lower-case remapped) query))]
+                               (str/starts-with? (str/lower-case remapped) query))]
       orig)))
 
 (s/defn ^:private human-readable-values-remapped-chain-filter-search
